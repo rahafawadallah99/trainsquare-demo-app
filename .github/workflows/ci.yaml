@@ -1,0 +1,89 @@
+name: build-push-deploy
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: ${{ secrets.GAR_REGION }}           # e.g. me-central2
+  GAR_REPO: ${{ secrets.GAR_REPO }}           # e.g. demo-app
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}     # e.g. demo-gke
+  GKE_LOCATION: ${{ secrets.GKE_LOCATION }}   # e.g. me-central2
+  IMAGE_NAME: app                             # repo path = $GAR_HOST/$PROJECT_ID/$GAR_REPO/$IMAGE_NAME
+  GAR_HOST: ${{ env.REGION }}-docker.pkg.dev
+  HELM_REPO_FULL: ${{ secrets.HELM_REPO }}    # e.g. <owner>/trainsquare-demo-helm
+  HELM_REPO_PAT: ${{ secrets.HELM_REPO_TOKEN }}
+  K8S_NAMESPACE: demo
+  RELEASE_NAME: demo
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # required for WIF
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}   # projects/123/locations/global/workloadIdentityPools/github-pool/providers/github
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}       # gha-deployer@PROJECT_ID.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure docker to use Artifact Registry
+        run: gcloud auth configure-docker $GAR_HOST --quiet
+        # Docs for AR docker auth. :contentReference[oaicite:4]{index=4}
+
+      - name: Build & Push
+        run: |
+          IMAGE_URI=$GAR_HOST/$PROJECT_ID/$GAR_REPO/$IMAGE_NAME
+          TAG=${GITHUB_SHA::7}
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+          docker build -t $IMAGE_URI:$TAG -t $IMAGE_URI:latest --build-arg APP_VERSION=$TAG .
+          docker push $IMAGE_URI:$TAG
+          docker push $IMAGE_URI:latest
+
+      # ---- Update Repo B values.yaml with new tag ----
+      - name: Checkout Helm repo (Repo B)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HELM_REPO_FULL }}
+          path: helmrepo
+          token: ${{ env.HELM_REPO_PAT }}
+
+      - name: Update values.yaml
+        uses: mikefarah/yq@v4
+        with:
+          cmd: |
+            yq -i '
+              .image.repository = strenv(IMAGE_URI) |
+              .image.tag = strenv(IMAGE_TAG)
+            ' helmrepo/charts/demo/values.yaml
+
+      - name: Commit & push
+        working-directory: helmrepo
+        run: |
+          git config user.email "[email protected]"
+          git config user.name "github-actions"
+          git add charts/demo/values.yaml
+          git commit -m "ci: set image $IMAGE_URI:$IMAGE_TAG"
+          git push
+
+      # ---- Helm deploy to GKE (phase 1) ----
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_LOCATION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Helm upgrade --install
+        run: |
+          helm upgrade --install $RELEASE_NAME helmrepo/charts/demo \
+            --namespace $K8S_NAMESPACE --create-namespace --wait --timeout 5m
