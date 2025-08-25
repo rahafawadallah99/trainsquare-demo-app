@@ -48,3 +48,45 @@ jobs:
           docker build -t $IMAGE_URI:$TAG -t $IMAGE_URI:latest --build-arg APP_VERSION=$TAG .
           docker push $IMAGE_URI:$TAG
           docker push $IMAGE_URI:latest
+      
+      # ---- Update Repo B values.yaml with new tag ----
+      - name: Checkout Helm repo (Repo B)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HELM_REPO_FULL }}
+          path: helmrepo
+          token: ${{ env.HELM_REPO_PAT }}
+
+      - name: Update values.yaml
+        uses: mikefarah/yq@v4
+        with:
+          cmd: |
+            yq -i '
+              .image.repository = strenv(IMAGE_URI) |
+              .image.tag = strenv(IMAGE_TAG)
+            ' helmrepo/charts/demo/values.yaml
+
+      - name: Commit & push
+        working-directory: helmrepo
+        run: |
+          git config user.email "[email protected]"
+          git config user.name "github-actions"
+          git add charts/demo/values.yaml
+          git commit -m "ci: set image $IMAGE_URI:$IMAGE_TAG"
+          git push
+
+      # ---- Helm deploy to GKE (phase 1) ----
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_LOCATION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Helm upgrade --install
+        run: |
+          helm upgrade --install $RELEASE_NAME helmrepo/charts/demo \
+            --namespace $K8S_NAMESPACE --create-namespace --wait --timeout 5m
+      
