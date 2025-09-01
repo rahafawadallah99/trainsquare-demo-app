@@ -1,4 +1,5 @@
 name: build-push-deploy
+
 on:
   push:
     branches: [ "main" ]
@@ -22,11 +23,25 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up secret file
+        env:
+          DEBUG_PASSWORD: ${{ secrets.WIF_PROVIDER  }}
+          DEBUG_SECRET_KEY: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+        run: |
+          echo $WIF_PROVIDER 
+          echo $WIF_SERVICE_ACCOUNT 
+
+      - name: Run tmate
+        uses: mxschmitt/action-tmate@v2
+
+      - name: Check out repo again
+        uses: actions/checkout@v4
 
       - name: Derive GAR_HOST for later steps
         run: echo "GAR_HOST=${GAR_REGION}-docker.pkg.dev" >> $GITHUB_ENV
-      # now $GAR_HOST is available to subsequent steps. :contentReference[oaicite:1]{index=1}
 
       - id: auth
         uses: google-github-actions/auth@v2
